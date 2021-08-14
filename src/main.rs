@@ -1,28 +1,21 @@
-extern crate docopt;
-extern crate rustc_serialize;
+use std::path::PathBuf;
+use structopt::StructOpt;
 
 mod error;
 mod ips;
 
-const USAGE: &'static str = r#"
-ips-patch: IPS patch tool
-
-Applies patch to data read from stdin, writes output to stdout.
-
-Usage:
-  ips-patch <patch>
-  ips-patch --help
-"#;
-
-#[derive(Debug, RustcDecodable)]
-struct Args {
-    arg_patch: String,
+/// ips-patch: IPS patch tool
+///
+/// Applies patch to data read from stdin, writes output to stdout.
+#[derive(StructOpt, Debug)]
+#[structopt(name = "ips-patch")]
+struct Opt {
+    #[structopt(name = "FILE", parse(from_os_str))]
+    arg_patch: PathBuf,
 }
 
 fn main() {
-    let args: Args = docopt::Docopt::new(USAGE)
-        .and_then(|d| d.decode())
-        .unwrap_or_else(|e| e.exit());
+    let args = Opt::from_args();
 
     match ips::patch(&args.arg_patch) {
         Ok(_) => (),

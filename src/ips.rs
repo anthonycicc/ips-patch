@@ -1,11 +1,16 @@
-use std;
-use std::io::prelude::*;
-
-use error::Error;
+use crate::error::IpsError;
+use eyre::eyre;
+use eyre::Result;
+use std::convert::TryFrom;
+use std::io::{Read, Write};
+use std::path::Path;
 
 #[derive(Debug)]
 enum Record {
-    Normal { offset: usize, data: Vec<u8> },
+    Normal {
+        offset: usize,
+        data: Vec<u8>,
+    },
     RuntimeLengthEncoded {
         offset: usize,
         size: usize,
@@ -19,26 +24,16 @@ struct Patch {
 }
 
 impl Patch {
-    fn load(patch_filename: &str) -> Result<Self, Error> {
+    fn load_pathbuf(patch_filename: &Path) -> Result<Self> {
+        Self::load(patch_filename.to_str().ok_or(IpsError::InvalidPath())?)
+    }
 
+    fn load(patch_filename: &str) -> Result<Self> {
         let buf = {
-
-            let mut f = try!(std::fs::File::open(patch_filename).map_err(|e| {
-                                                                             Error::Io {
-                    cause: e,
-                    description: format!("Failed to open patch file '{}'", patch_filename),
-                }
-                                                                         }));
+            let mut f = std::fs::File::open(patch_filename)?;
 
             let mut buf = Vec::new();
-            try!(f.read_to_end(&mut buf)
-                     .map_err(|e| {
-                                  Error::Io {
-                                      cause: e,
-                                      description: format!("Failed to read patch file '{}'",
-                                                           patch_filename),
-                                  }
-                              }));
+            f.read_to_end(&mut buf)?;
 
             buf
         };
@@ -46,10 +41,9 @@ impl Patch {
         Patch::parse(&buf)
     }
 
-    fn parse(patch: &Vec<u8>) -> Result<Self, Error> {
-
+    fn parse(patch: &[u8]) -> Result<Self> {
         if patch.len() < 5 || &patch[..5] != "PATCH".as_bytes() {
-            return Err(Error::InvalidPatch { description: format!("Missing PATCH header") });
+            "Missing PATCH header".to_string();
         }
         let mut patch = &patch[5..];
 
@@ -61,41 +55,44 @@ impl Patch {
             }
 
             if patch.len() < 3 {
-                return Err(Error::InvalidPatch {
-                               description: format!("Expecting record 'offset' field, got {} of 3 bytes \
+                IpsError::InvalidPatch {
+                    0: format!(
+                        "Expecting record 'offset' field, got {} of 3 bytes \
                                           before reaching end of file",
-                                                    patch.len()),
-                           });
+                        patch.len()
+                    ),
+                };
             }
             let offset = ((patch[0] as u32) << 16) + ((patch[1] as u32) << 8) + (patch[2] as u32);
             patch = &patch[3..];
 
             if patch.len() < 2 {
-                return Err(Error::InvalidPatch {
-                               description: format!("Expecting record 'size' field, got {} of 2 bytes before \
+                IpsError::InvalidPatch {
+                    0: format!(
+                        "Expecting record 'size' field, got {} of 2 bytes before \
                                           reaching end of file",
-                                                    patch.len()),
-                           });
+                        patch.len()
+                    ),
+                };
             }
             let size = ((patch[0] as u16) << 8) + (patch[1] as u16);
             patch = &patch[2..];
 
             records.push(if 0 == size {
-
                 if patch.len() < 2 {
-                    return Err(Error::InvalidPatch {
-                        description: format!("Expecting record 'rle_size', got {} of 2 bytes \
+                    IpsError::InvalidPatch {
+                        0: format!(
+                            "Expecting record 'rle_size', got {} of 2 bytes \
                                               before reaching end of file",
-                                             patch.len()),
-                    });
+                            patch.len()
+                        ),
+                    };
                 }
                 let rle_size = ((patch[0] as u16) << 8) + (patch[1] as u16);
                 patch = &patch[2..];
 
-                if patch.len() < 1 {
-                    return Err(Error::InvalidPatch {
-                        description: format!("Expecting record 'rle_value' field, got end of file"),
-                    });
+                if patch.is_empty() {
+                    "Expecting record 'rle_value' field, got end of file".to_string();
                 }
 
                 let rle_value = patch[0];
@@ -106,36 +103,37 @@ impl Patch {
                     size: rle_size as usize,
                     value: rle_value,
                 }
-
             } else {
-
                 if patch.len() < size as usize {
-                    return Err(Error::InvalidPatch {
-                        description: format!("Expecting record 'data' field, got {} of {} bytes \
+                    IpsError::InvalidPatch {
+                        0: format!(
+                            "Expecting record 'data' field, got {} of {} bytes \
                                               before reaching end of file",
-                                             patch.len(),
-                                             size),
-                    });
+                            patch.len(),
+                            size
+                        ),
+                    };
                 }
                 let data = Vec::from(&patch[..(size as usize)]);
                 patch = &patch[(size as usize)..];
 
                 Record::Normal {
                     offset: offset as usize,
-                    data: data,
+                    data,
                 }
             });
         }
 
         // records.sort();
 
-        let p = Patch { records: records };
+        let p = Patch { records };
         Ok(p)
     }
 
     #[allow(dead_code)]
     fn dump_records<T>(records: T)
-        where T: Iterator<Item = Record>
+    where
+        T: Iterator<Item = Record>,
     {
         for rec in records {
             match rec {
@@ -156,8 +154,8 @@ impl Patch {
         }
     }
 
-    fn apply(&self, ibuf: &Vec<u8>) -> Result<Vec<u8>, Error> {
-        let mut obuf = ibuf.clone();
+    fn apply(&self, ibuf: &[u8]) -> Result<Vec<u8>> {
+        let mut obuf = ibuf.to_vec();
         for rec in self.records.iter() {
             match *rec {
                 Record::Normal {
@@ -170,12 +168,14 @@ impl Patch {
                         continue;
                     }
                     if ibuf.len() < *offset + data.len() {
-                        return Err(Error::InvalidPatch {
-                                       description: format!("Normal record with offset {}, size {} is out of \
+                        IpsError::InvalidPatch {
+                            0: format!(
+                                "Normal record with offset {}, size {} is out of \
                                                   bounds",
-                                                            offset,
-                                                            data.len()),
-                                   });
+                                offset,
+                                data.len()
+                            ),
+                        };
                     }
                     for i in 0..data.len() {
                         obuf[*offset + i] = data[i];
@@ -194,12 +194,13 @@ impl Patch {
                         continue;
                     }
                     if ibuf.len() < offset + size {
-                        return Err(Error::InvalidPatch {
-                                       description: format!("RLE record with offset {}, size {} is out of \
+                        IpsError::InvalidPatch {
+                            0: format!(
+                                "RLE record with offset {}, size {} is out of \
                                                   bounds",
-                                                            offset,
-                                                            size),
-                                   });
+                                offset, size
+                            ),
+                        };
                     }
                     for i in *offset..(*offset + *size) {
                         obuf[i] = *value;
@@ -211,33 +212,30 @@ impl Patch {
     }
 }
 
-pub fn patch(patch_filename: &str) -> Result<(), Error> {
-
-    let patch = try!(Patch::load(patch_filename));
+pub fn patch(patch_filename: &Path) -> Result<()> {
+    let patch = Patch::load_pathbuf(patch_filename)?;
 
     let ibuf = {
         let mut x = Vec::new();
-        try!(std::io::stdin()
-                 .read_to_end(&mut x)
-                 .map_err(|e| {
-                              Error::Io {
-                                  cause: e,
-                                  description: format!("Failed to read from stdin to end"),
-                              }
-                          }));
+        if std::io::stdin()
+            .read_to_end(&mut x)
+            .map_err(IpsError::try_from)
+            .is_err()
+        {
+            return Err(eyre!("Could not read stdin"));
+        }
         x
     };
 
-    let obuf = try!(patch.apply(&ibuf));
+    let obuf = patch.apply(&ibuf)?;
 
-    try!(std::io::stdout()
-             .write_all(&obuf)
-             .map_err(|e| {
-                          Error::Io {
-                              cause: e,
-                              description: format!("Failed to write to stdout"),
-                          }
-                      }));
+    if std::io::stdout()
+        .write_all(&obuf)
+        .map_err(IpsError::try_from)
+        .is_err()
+    {
+        return Err(eyre!("Could not write to stdout"));
+    }
 
     Ok(())
 }
